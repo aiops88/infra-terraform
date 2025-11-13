@@ -35,7 +35,7 @@ infra/
 ├─ rds.tf                   # Base de datos PostgreSQL
 ├─ secrets.tf               # Gestión de secretos
 └─ cloudwatch.tf            # Métricas y alarmas
-
+```
 
 ## 🚀 Flujo de despliegue
 
@@ -46,7 +46,7 @@ Se ejecuta manualmente o mediante un pipeline de IaC:
 terraform init
 terraform plan
 terraform apply
-
+```
 
 Esto crea toda la infraestructura base (**VPC, ECS, ECR, ALB, RDS, etc.**).
 
@@ -59,9 +59,10 @@ Cada desarrollador hace **push** del código actualizado (front o back). El pipe
 - Push a ECR con una etiqueta versionada (`v1.0.${BUILD_ID}`)
 - Actualización del servicio ECS reemplazando el tag en el `taskdef.json`:
 
+```bash
 aws ecs register-task-definition --cli-input-json file://taskdef.json
 aws ecs update-service --cluster bookstore-cluster --service bookstore-backend-svc --force-new-deployment
-
+```
 
 *(Esto se hace con un script de shell o un paso “AWS CLI” en el pipeline).*
 
