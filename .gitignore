@@ -1,0 +1,40 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+
+# Sensitive files - NUNCA subir estos archivos porque no queremos hardcodear
+*.tfvars
+!example.tfvars
+secrets.auto.tfvars
+*.auto.tfvars
+
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI configuration files
+.terraformrc
+terraform.rc
+
+# Lock file (opcional por verisonamiento)
+.terraform.lock.hcl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
