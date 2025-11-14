@@ -1,0 +1,22 @@
+# ============================================
+# .dockerignore
+# ============================================
+# Archivo: frontend/.dockerignore
+
+node_modules
+npm-debug.log
+.git
+.gitignore
+README.md
+.env
+.env.local
+.DS_Store
+*.log
+coverage
+.vscode
+.idea
+dist
+build
+*.md
+Dockerfile
+docker-compose.yml
