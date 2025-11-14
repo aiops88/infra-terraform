@@ -1,0 +1,359 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - backend/*
+      - frontend/*
+      - infra/terraform/*
+
+variables:
+  AWS_REGION: 'us-east-1'
+  ECR_BACKEND_REPO: 'bookstore-backend'
+  ECR_FRONTEND_REPO: 'bookstore-frontend'
+  ECS_CLUSTER: 'bookstore-cluster'
+  ECS_BACKEND_SERVICE: 'bookstore-backend-svc'
+  ECS_FRONTEND_SERVICE: 'bookstore-frontend-svc'
+  
+  # Semantic versioning
+  MAJOR: 1
+  MINOR: 0
+  BUILD_VERSION: $[counter(variables['MINOR'], 0)]
+
+stages:
+  # ==========================================
+  # STAGE 1: BUILD & SCAN
+  # ==========================================
+  - stage: Build
+    displayName: 'Build & Security Scan'
+    jobs:
+      - job: Backend
+        displayName: 'Build Backend'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          # Checkout code
+          - checkout: self
+            fetchDepth: 1
+
+          # Install Hadolint (Dockerfile linter)
+          - script: |
+              wget -O hadolint https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+              chmod +x hadolint
+              sudo mv hadolint /usr/local/bin/
+            displayName: 'Install Hadolint'
+
+          # Lint Dockerfile
+          - script: |
+              hadolint backend/Dockerfile
+            displayName: 'Lint Backend Dockerfile'
+
+          # Build Docker image
+          - task: Docker@2
+            displayName: 'Build Backend Image'
+            inputs:
+              command: 'build'
+              Dockerfile: 'backend/Dockerfile'
+              buildContext: 'backend'
+              tags: |
+                $(MAJOR).$(MINOR).$(BUILD_VERSION)
+                latest
+
+          # Install Trivy (vulnerability scanner)
+          - script: |
+              wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+              echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+              sudo apt-get update
+              sudo apt-get install trivy
+            displayName: 'Install Trivy'
+
+          # Scan image for vulnerabilities
+          - script: |
+              trivy image --severity HIGH,CRITICAL --exit-code 1 bookstore-backend:latest
+            displayName: 'Trivy Security Scan Backend'
+            continueOnError: false
+
+          # Install Dockle (container security checker)
+          - script: |
+              wget https://github.com/goodwithtech/dockle/releases/download/v0.4.14/dockle_0.4.14_Linux-64bit.tar.gz
+              tar zxvf dockle_0.4.14_Linux-64bit.tar.gz
+              sudo mv dockle /usr/local/bin
+            displayName: 'Install Dockle'
+
+          # Run Dockle security checks
+          - script: |
+              dockle bookstore-backend:latest
+            displayName: 'Dockle Security Check Backend'
+
+          # Save image as artifact
+          - script: |
+              docker save bookstore-backend:latest -o backend-image.tar
+            displayName: 'Save Backend Image'
+
+          - publish: backend-image.tar
+            artifact: backend-docker-image
+
+      - job: Frontend
+        displayName: 'Build Frontend'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          # Lint Dockerfile
+          - script: |
+              hadolint frontend/Dockerfile
+            displayName: 'Lint Frontend Dockerfile'
+
+          # Build Docker image
+          - task: Docker@2
+            displayName: 'Build Frontend Image'
+            inputs:
+              command: 'build'
+              Dockerfile: 'frontend/Dockerfile'
+              buildContext: 'frontend'
+              tags: |
+                $(MAJOR).$(MINOR).$(BUILD_VERSION)
+                latest
+
+          # Scan with Trivy
+          - script: |
+              trivy image --severity HIGH,CRITICAL --exit-code 1 bookstore-frontend:latest
+            displayName: 'Trivy Security Scan Frontend'
+
+          # Dockle check
+          - script: |
+              dockle bookstore-frontend:latest
+            displayName: 'Dockle Security Check Frontend'
+
+          # Save image
+          - script: |
+              docker save bookstore-frontend:latest -o frontend-image.tar
+            displayName: 'Save Frontend Image'
+
+          - publish: frontend-image.tar
+            artifact: frontend-docker-image
+
+  # ==========================================
+  # STAGE 2: PUSH TO ECR
+  # ==========================================
+  - stage: Push
+    displayName: 'Push to ECR'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: PushImages
+        displayName: 'Push Docker Images to ECR'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          # Configure AWS CLI
+          - task: AWSCLI@1
+            displayName: 'Configure AWS CLI'
+            inputs:
+              awsCredentials: 'AWS-ServiceConnection'
+              regionName: '$(AWS_REGION)'
+
+          # Download artifacts
+          - download: current
+            artifact: backend-docker-image
+
+          - download: current
+            artifact: frontend-docker-image
+
+          # Load Docker images
+          - script: |
+              docker load -i $(Pipeline.Workspace)/backend-docker-image/backend-image.tar
+              docker load -i $(Pipeline.Workspace)/frontend-docker-image/frontend-image.tar
+            displayName: 'Load Docker Images'
+
+          # Login to ECR
+          - script: |
+              aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.$(AWS_REGION).amazonaws.com
+            displayName: 'ECR Login'
+
+          # Tag and push backend
+          - script: |
+              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+              ECR_URL=$ACCOUNT_ID.dkr.ecr.$(AWS_REGION).amazonaws.com
+              
+              docker tag bookstore-backend:latest $ECR_URL/$(ECR_BACKEND_REPO):$(MAJOR).$(MINOR).$(BUILD_VERSION)
+              docker tag bookstore-backend:latest $ECR_URL/$(ECR_BACKEND_REPO):latest
+              
+              docker push $ECR_URL/$(ECR_BACKEND_REPO):$(MAJOR).$(MINOR).$(BUILD_VERSION)
+              docker push $ECR_URL/$(ECR_BACKEND_REPO):latest
+            displayName: 'Push Backend to ECR'
+
+          # Tag and push frontend
+          - script: |
+              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+              ECR_URL=$ACCOUNT_ID.dkr.ecr.$(AWS_REGION).amazonaws.com
+              
+              docker tag bookstore-frontend:latest $ECR_URL/$(ECR_FRONTEND_REPO):$(MAJOR).$(MINOR).$(BUILD_VERSION)
+              docker tag bookstore-frontend:latest $ECR_URL/$(ECR_FRONTEND_REPO):latest
+              
+              docker push $ECR_URL/$(ECR_FRONTEND_REPO):$(MAJOR).$(MINOR).$(BUILD_VERSION)
+              docker push $ECR_URL/$(ECR_FRONTEND_REPO):latest
+            displayName: 'Push Frontend to ECR'
+
+  # ==========================================
+  # STAGE 3: DEPLOY TO ECS
+  # ==========================================
+  - stage: Deploy
+    displayName: 'Deploy to ECS'
+    dependsOn: Push
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployECS
+        displayName: 'Deploy to ECS Fargate'
+        environment: 'production'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # Configure AWS
+                - task: AWSCLI@1
+                  displayName: 'Configure AWS CLI'
+                  inputs:
+                    awsCredentials: 'AWS-ServiceConnection'
+                    regionName: '$(AWS_REGION)'
+
+                # Update Backend Service
+                - script: |
+                    aws ecs update-service \
+                      --cluster $(ECS_CLUSTER) \
+                      --service $(ECS_BACKEND_SERVICE) \
+                      --force-new-deployment \
+                      --region $(AWS_REGION)
+                  displayName: 'Update Backend ECS Service'
+
+                # Wait for backend stability
+                - script: |
+                    aws ecs wait services-stable \
+                      --cluster $(ECS_CLUSTER) \
+                      --services $(ECS_BACKEND_SERVICE) \
+                      --region $(AWS_REGION)
+                  displayName: 'Wait for Backend Stability'
+
+                # Update Frontend Service
+                - script: |
+                    aws ecs update-service \
+                      --cluster $(ECS_CLUSTER) \
+                      --service $(ECS_FRONTEND_SERVICE) \
+                      --force-new-deployment \
+                      --region $(AWS_REGION)
+                  displayName: 'Update Frontend ECS Service'
+
+                # Wait for frontend stability
+                - script: |
+                    aws ecs wait services-stable \
+                      --cluster $(ECS_CLUSTER) \
+                      --services $(ECS_FRONTEND_SERVICE) \
+                      --region $(AWS_REGION)
+                  displayName: 'Wait for Frontend Stability'
+
+                # Health check
+                - script: |
+                    ALB_DNS=$(aws elbv2 describe-load-balancers \
+                      --names bookstore-alb \
+                      --query 'LoadBalancers[0].DNSName' \
+                      --output text \
+                      --region $(AWS_REGION))
+                    
+                    echo "Testing health endpoint: http://$ALB_DNS/health"
+                    
+                    for i in {1..30}; do
+                      if curl -f "http://$ALB_DNS/health"; then
+                        echo "Health check passed!"
+                        exit 0
+                      fi
+                      echo "Waiting for application to be healthy... ($i/30)"
+                      sleep 10
+                    done
+                    
+                    echo "Health check failed after 5 minutes"
+                    exit 1
+                  displayName: 'Verify Deployment Health'
+
+  # ==========================================
+  # STAGE 4: INFRASTRUCTURE (Terraform)
+  # ==========================================
+  - stage: Infrastructure
+    displayName: 'Terraform Infrastructure'
+    dependsOn: []
+    condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+    jobs:
+      - job: TerraformPlan
+        displayName: 'Terraform Plan'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          # Install Terraform
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: '1.5.0'
+
+          # Configure AWS
+          - task: AWSCLI@1
+            inputs:
+              awsCredentials: 'AWS-ServiceConnection'
+              regionName: '$(AWS_REGION)'
+
+          # Terraform Init
+          - script: |
+              cd infra/terraform
+              terraform init
+            displayName: 'Terraform Init'
+
+          # Terraform Plan
+          - script: |
+              cd infra/terraform
+              terraform plan -out=tfplan
+            displayName: 'Terraform Plan'
+            env:
+              TF_VAR_db_password: $(DB_PASSWORD)
+
+          # Save plan
+          - publish: infra/terraform/tfplan
+            artifact: terraform-plan
+
+      - deployment: TerraformApply
+        displayName: 'Terraform Apply'
+        dependsOn: TerraformPlan
+        condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+        environment: 'production'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@0
+                  inputs:
+                    terraformVersion: '1.5.0'
+
+                - task: AWSCLI@1
+                  inputs:
+                    awsCredentials: 'AWS-ServiceConnection'
+                    regionName: '$(AWS_REGION)'
+
+                - download: current
+                  artifact: terraform-plan
+
+                - script: |
+                    cd infra/terraform
+                    terraform init
+                    terraform apply $(Pipeline.Workspace)/terraform-plan/tfplan
+                  displayName: 'Terraform Apply'
+                  env:
+                    TF_VAR_db_password: $(DB_PASSWORD)
