@@ -9,7 +9,7 @@ infra/terraform/
 ├── .gitignore
 ├── README.md
 ├── example.tfvars
-├── secrets.auto.tfvars        # NO SUBIR - Crearlo localmente
+├── secrets.auto.tfvars        # Por seguridad no lo subiremos - Crearlo localmente
 ├── backend.tf
 ├── providers.tf
 ├── variables.tf
